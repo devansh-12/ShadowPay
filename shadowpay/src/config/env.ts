@@ -1,0 +1,6 @@
+export const env = {
+  BITGO_ACCESS_TOKEN: process.env.BITGO_ACCESS_TOKEN!,
+  BITGO_WALLET_ID: process.env.BITGO_WALLET_ID!,
+  BITGO_WALLET_PASSPHRASE: process.env.BITGO_WALLET_PASSPHRASE!,
+  DATABASE_URL: process.env.DATABASE_URL!,
+};
