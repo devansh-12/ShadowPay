@@ -1,36 +1,101 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ShadowPay
 
-## Getting Started
+Private Bitcoin payments using ERC-5564 stealth addresses on Bitcoin testnet.
 
-First, run the development server:
+## What it does
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+Every payment generates a **one-time stealth address** derived from the recipient's published meta-address. Observers on-chain cannot link payments to recipients. Only the recipient can scan announcements and claim funds.
+
+## Architecture
+
+```
+POST /api/disburse
+  └─ generateStealthAddress()   ← ERC-5564 crypto engine (secp256k1)
+  └─ prisma.disbursement.create ← status: PENDING
+  └─ BitGo wallet.sendCoins()   ← broadcast to testnet
+  └─ prisma.disbursement.update ← status: BROADCAST
+
+POST /api/webhook               ← BitGo confirmation events
+  └─ prisma.webhookEvent.create ← raw event log
+  └─ prisma.disbursement.update ← status: CONFIRMED | FAILED
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Key modules
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Path | Purpose |
+|---|---|
+| `src/lib/stealth.ts` | Pure ERC-5564 crypto (keygen, stealth addr, view tag, key derivation) |
+| `src/lib/bitgo.ts` | BitGo SDK singleton (testnet) |
+| `src/services/disbursementService.ts` | Orchestrates disburse flow |
+| `src/services/walletService.ts` | Recipient-side announcement scanning |
+| `src/app/api/disburse/route.ts` | `POST /api/disburse` |
+| `src/app/api/webhook/route.ts` | `POST /api/webhook` |
+| `src/app/api/health/route.ts` | `GET /api/health` |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Quick start
 
-## Learn More
+```bash
+cd shadowpay
+cp .env.local.example .env.local   # fill in your keys
+npx prisma migrate dev --name init
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Environment variables
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | Postgres connection string (Neon) |
+| `BITGO_ACCESS_TOKEN` | BitGo API access token |
+| `BITGO_WALLET_ID` | BitGo wallet ID (tbtc) |
+| `BITGO_WALLET_PASSPHRASE` | BitGo wallet passphrase |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## API
 
-## Deploy on Vercel
+### `POST /api/disburse`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```json
+{
+  "recipientMetaAddress": "st:eth:0x<spendPubKey><viewPubKey>",
+  "recipientAlias": "alice",
+  "amountSats": 10000
+}
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Response `201`:
+```json
+{
+  "disbursementId": "uuid",
+  "stealthAddress": "0x...",
+  "txHash": "...",
+  "announcement": { "schemeId": 1, "stealthAddress": "0x...", "ephemeralPubKey": "...", "viewTag": 42 }
+}
+```
+
+### `POST /api/webhook`
+
+Accepts BitGo transfer events (`transfer_confirmed`, `transfer_failed`). Updates disbursement status automatically.
+
+### `GET /api/health`
+
+```json
+{ "status": "ShadowPay backend running" }
+```
+
+## Crypto engine
+
+The stealth address implementation follows **ERC-5564 scheme 1** (secp256k1):
+
+1. Sender picks a random ephemeral keypair
+2. ECDH with recipient's view key → Keccak256 → view tag + tweak scalar
+3. Stealth pub key = spend pub key + (tweak × G)
+4. Recipient scans: ECDH check → view tag match → derive stealth private key
+
+All crypto lives in `src/lib/stealth.ts` (zero blockchain I/O, fully unit-tested in the `crypto-algo` repo).
+
+## Tech stack
+
+- **Next.js 16** (App Router, API Routes)
+- **Prisma 7** + **Neon Postgres**
+- **BitGo SDK** (testnet BTC)
+- **@noble/secp256k1 v3** + **@noble/hashes v2**
